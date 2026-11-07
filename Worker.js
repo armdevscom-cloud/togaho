@@ -2,14 +2,13 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const clientIP = request.headers.get("cf-connecting-ip") || "0.0.0.0";
-    const currentFeature = url.searchParams.get("feature") || "unknown";
     const nowStr = new Date().toISOString();
 
-    // 0. 安全防線：阻擋被 BAN 的特徵碼與 IP 進站
+    // 0. 安全防線：IP 封鎖檢查
     try {
-      const isBanned = await env.DB.prepare("SELECT * FROM banned_users WHERE (target_value = ? OR target_value = ?) AND banned_until > ?").bind(currentFeature, clientIP, nowStr).first();
+      const isBanned = await env.DB.prepare("SELECT * FROM banned_users WHERE target_value = ? AND banned_until > ?").bind(clientIP, nowStr).first();
       if (isBanned) {
-        return new Response(`<html><body style="background:#121214;color:#ff5555;text-align:center;padding-top:100px;font-family:sans-serif;"><h1>您已被系統封鎖</h1><p>到期時間：${isBanned.banned_until}</p></body></html>`, {
+        return new Response(`<html><body style="background:#000;color:#ff5555;text-align:center;padding-top:100px;font-family:sans-serif;"><h1>帳號或 IP 已被系統封鎖</h1><p>到期時間：${isBanned.banned_until}</p></body></html>`, {
           headers: { "Content-Type": "text/html;charset=UTF-8" },
           status: 403
         });
@@ -17,319 +16,415 @@ export default {
     } catch(e) {}
 
     // ----------------------------------------------------
-    // 【後端 API 路由控制（對接：APIText）】
+    // 【後端 API 路由】
     // ----------------------------------------------------
-    if (url.pathname === "/api/APIText") {
-      // 處理 GET 請求：撈取貼文或管理員搜尋
-      if (request.method === "GET") {
-        const action = url.searchParams.get("action");
-        if (action === "search") {
-          const pwd = url.searchParams.get("pwd"), q = url.searchParams.get("query") || "", myF = url.searchParams.get("myFeature") || "";
-          const s = await env.DB.prepare("SELECT key_value FROM admin_config WHERE key_name = 'admin_pwd'").first();
-          if (!pwd || pwd !== s.key_value) return new Response(JSON.stringify({error:"密碼不正確"}), {status:401, headers:{"Content-Type":"application/json"}});
-          
-          // 搜尋貼文者，排除管理員自己
-          const { results } = await env.DB.prepare("SELECT id,content,youtube_url,feature FROM posts WHERE feature LIKE ? AND feature != ? AND is_blocked = 0 ORDER BY id DESC").bind(`%${q}%`, myF).all();
-          return new Response(JSON.stringify(results), {headers:{"Content-Type":"application/json"}});
+    if (url.pathname.startsWith("/api/")) {
+      
+      // 註冊
+      if (url.pathname === "/api/register" && request.method === "POST") {
+        const { username, password } = await request.json();
+        if (!username || !password) return new Response(JSON.stringify({error:"請輸入帳號與密碼"}), {status:400});
+        try {
+          const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
+          const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+          const userCount = await env.DB.prepare("SELECT COUNT(*) as cnt FROM users").first();
+          const role = (userCount.cnt === 0 || username === "admin") ? "admin" : "user";
+          const defaultAvatar = "https://picsum.photos/200";
+
+          await env.DB.prepare("INSERT INTO users (username, password_hash, role, avatar_url, bio) VALUES (?, ?, ?, ?, ?)").bind(username, passwordHash, role, defaultAvatar, "這人很懶，什麼都沒有留下...").run();
+          return new Response(JSON.stringify({message:"註冊成功"}), {status:200});
+        } catch(e) {
+          return new Response(JSON.stringify({error:"帳號已被註冊"}), {status:400});
         }
-        
-        // 預設撈取一般貼文
-        const { results } = await env.DB.prepare("SELECT id,content,image_url,youtube_url,is_blocked,feature FROM posts WHERE is_blocked = 0 ORDER BY id DESC").all();
+      }
+
+      // 登入
+      if (url.pathname === "/api/login" && request.method === "POST") {
+        const { username, password } = await request.json();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
+        const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        const user = await env.DB.prepare("SELECT * FROM users WHERE username = ? AND password_hash = ?").bind(username, passwordHash).first();
+        if (!user) return new Response(JSON.stringify({error:"帳號或密碼錯誤"}), {status:401});
+        return new Response(JSON.stringify({message:"登入成功", user}), {status:200});
+      }
+
+      // 取得動態牆 (包含貼文、作者頭貼、按讚數、留言數)
+      if (url.pathname === "/api/posts" && request.method === "GET") {
+        const username = url.searchParams.get("username") || "";
+        const { results: posts } = await env.DB.prepare(`
+          SELECT p.*, u.avatar_url,
+          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) as like_count,
+          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id AND l.username = ?) as is_liked,
+          (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) as comment_count
+          FROM posts p 
+          LEFT JOIN users u ON p.username = u.username 
+          WHERE p.is_blocked = 0 ORDER BY p.id DESC
+        `).bind(username).all();
+        return new Response(JSON.stringify(posts), {headers:{"Content-Type":"application/json"}});
+      }
+
+      // 發佈貼文
+      if (url.pathname === "/api/posts" && request.method === "POST") {
+        const { username, content, image_url, youtube_url } = await request.json();
+        if (!username) return new Response(JSON.stringify({error:"請先登入"}), {status:401});
+        await env.DB.prepare("INSERT INTO posts (username, content, image_url, youtube_url) VALUES (?, ?, ?, ?)").bind(username, content, image_url || null, youtube_url || null).run();
+        return new Response(JSON.stringify({message:"發布成功"}), {status:200});
+      }
+
+      // 按讚 / 收回讚
+      if (url.pathname === "/api/like" && request.method === "POST") {
+        const { postId, username } = await request.json();
+        const existing = await env.DB.prepare("SELECT * FROM likes WHERE post_id = ? AND username = ?").bind(postId, username).first();
+        if (existing) {
+          await env.DB.prepare("DELETE FROM likes WHERE post_id = ? AND username = ?").bind(postId, username).run();
+          return new Response(JSON.stringify({liked: false}), {status:200});
+        } else {
+          await env.DB.prepare("INSERT INTO likes (post_id, username) VALUES (?, ?)").bind(postId, username).run();
+          return new Response(JSON.stringify({liked: true}), {status:200});
+        }
+      }
+
+      // 取得留言
+      if (url.pathname === "/api/comments" && request.method === "GET") {
+        const postId = url.searchParams.get("postId");
+        const { results } = await env.DB.prepare("SELECT c.*, u.avatar_url FROM comments c LEFT JOIN users u ON c.username = u.username WHERE c.post_id = ? ORDER BY c.id DESC").bind(postId).all();
         return new Response(JSON.stringify(results), {headers:{"Content-Type":"application/json"}});
       }
 
-      // 處理 POST 請求：發文、BAN人、解封、下架貼文
-      if (request.method === "POST") {
-        const action = url.searchParams.get("action");
-        const n = await request.json();
-        const s = await env.DB.prepare("SELECT key_value FROM admin_config WHERE key_name = 'admin_pwd'").first();
-        
-        if (action === "ban") {
-          if (!n.pwd || n.pwd !== s.key_value) return new Response(JSON.stringify({error:"密碼錯誤"}), {status:401});
-          let t = new Date();
-          if (n.is_perm) {
-            t = new Date("9999-12-31T23:59:59Z");
-          } else {
-            t.setDate(t.getDate() + (n.days || 0));
-            t.setMonth(t.getMonth() + (n.months || 0));
-            t.setFullYear(t.getFullYear() + (n.years || 0));
-          }
-          const r = t.toISOString();
-          await env.DB.prepare("INSERT INTO banned_users (target_value, ban_type, banned_until) VALUES (?, ?, ?) ON CONFLICT(target_value) DO UPDATE SET banned_until = ?").bind(n.target, n.type, r, r).run();
-          return new Response(JSON.stringify({message:`成功封鎖！期限至：${r}`}), {status:200});
-        }
-        
-        if (action === "unban") {
-          if (!n.pwd || n.pwd !== s.key_value) return new Response(JSON.stringify({error:"密碼錯誤"}), {status:401});
-          await env.DB.prepare("DELETE FROM banned_users WHERE target_value = ?").bind(n.target).run();
-          return new Response(JSON.stringify({message:"該使用者已成功解封！"}), {status:200});
-        }
-        
-        if (action === "block-post") {
-          if (!n.pwd || n.pwd !== s.key_value) return new Response(JSON.stringify({error:"密碼錯誤"}), {status:401});
-          await env.DB.prepare("UPDATE posts SET is_blocked = 1 WHERE id = ?").bind(n.id).run();
-          return new Response(JSON.stringify({message:"帖子已成功下架隱藏。"}), {status:200});
-        }
-
-        // 一般用戶發貼文邏輯
-        const { content: r, image_url: o, youtube_url: c, feature: i, num1: d, num2: m, operator: u, userAnswer: l } = n;
-        let p = 0; 
-        if (u === "+") p = d + m;
-        else if (u === "-") p = d - m;
-        else if (u === "*") p = d * m;
-        
-        if (l !== p) return new Response(JSON.stringify({error:"驗證代碼計算不正確！"}), {status:400});
-        await env.DB.prepare("INSERT INTO posts (content, image_url, youtube_url, feature) VALUES (?, ?, ?, ?)").bind(r, o, c, i).run();
-        return new Response(JSON.stringify({message:"發布成功！"}), {status:200});
+      // 新增留言
+      if (url.pathname === "/api/comments" && request.method === "POST") {
+        const { postId, username, content } = await request.json();
+        if (!username || !content) return new Response(JSON.stringify({error:"請輸入內容"}), {status:400});
+        await env.DB.prepare("INSERT INTO comments (post_id, username, content) VALUES (?, ?, ?)").bind(postId, username, content).run();
+        return new Response(JSON.stringify({message:"留言成功"}), {status:200});
       }
-      return new Response("Method not allowed", {status:405});
+
+      // 取得個人資料與貼文
+      if (url.pathname === "/api/profile" && request.method === "GET") {
+        const username = url.searchParams.get("username");
+        const user = await env.DB.prepare("SELECT username, role, avatar_url, bio, created_at FROM users WHERE username = ?").bind(username).first();
+        const { results: posts } = await env.DB.prepare("SELECT * FROM posts WHERE username = ? AND is_blocked = 0 ORDER BY id DESC").bind(username).all();
+        return new Response(JSON.stringify({ user, posts }), {headers:{"Content-Type":"application/json"}});
+      }
+
+      // 更新個人簡介與頭貼
+      if (url.pathname === "/api/profile" && request.method === "POST") {
+        const { username, avatar_url, bio } = await request.json();
+        await env.DB.prepare("UPDATE users SET avatar_url = ?, bio = ? WHERE username = ?").bind(avatar_url, bio, username).run();
+        return new Response(JSON.stringify({message:"更新成功"}), {status:200});
+      }
     }
 
     // ----------------------------------------------------
-    // 【預設路由：輸出完整前端 HTML 網頁介面】
+    // 【前端 TikTok 風格介面】
     // ----------------------------------------------------
     const html = `<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>TOGAHO - TGH</title>
+<title>TOGAHO - 影音社群</title>
 <style>
-body{font-family:-apple-system,sans-serif;background:#121214;color:#e1e1e6;min-height:100vh;margin:0;padding:20px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center}
-.container{width:100%;max-width:500px}
-.card{background:#202024;padding:25px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.2);margin-bottom:20px;border:1px solid #29292e}
-h1,h2,h3{color:#fff;margin-top:0}
-input,select,textarea{width:100%;padding:12px;margin:8px 0;border:1px solid #29292e;border-radius:8px;box-sizing:border-box;font-size:15px;background:#121214;color:#fff}
-textarea{height:80px;resize:none}
-button{background:#00875f;color:#fff;border:none;width:100%;padding:12px;border-radius:8px;font-size:16px;cursor:pointer;margin-top:10px;font-weight:700}
-button:hover{background:#00a372}
-.math-box{background:#121214;padding:10px;border-radius:8px;margin:10px 0;font-size:16px;font-weight:700;display:flex;justify-content:center;gap:5px;border:1px solid #29292e}
-.post-item{background:#202024;border:1px solid #29292e;padding:15px;border-radius:12px;margin-bottom:12px;text-align:left}
-.post-text{font-size:15px;margin-bottom:8px;white-space:pre-wrap}
-.post-img,.post-video{width:100%;max-height:250px;object-fit:cover;border-radius:8px;margin-top:8px}
-.post-video{height:250px;border:none;background:#000}
-.preview-box{background:#1a1a1e;border:1px dashed #00875f;padding:10px;border-radius:8px;margin-top:5px;display:none;text-align:center}
-.preview-title{font-size:12px;color:#00875f;font-weight:700;margin-bottom:5px}
-.admin-section{border-top:2px dashed #ff79c6;margin-top:40px;padding-top:20px}
-.ban-btn{background:#c53030;font-size:12px;padding:6px 12px;border-radius:6px;width:auto;margin-top:5px;color:#fff;cursor:pointer;font-weight:700;border:none}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,sans-serif;background:#000;color:#fff;overflow:hidden;height:100vh;display:flex;justify-content:center}
+.app{width:100%;max-width:480px;height:100vh;background:#121214;position:relative;display:flex;flex-direction:column}
+
+/* 頂端導航列 */
+.top-nav{position:absolute;top:0;left:0;right:0;height:50px;display:flex;justify-content:center;align-items:center;gap:20px;z-index:20;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);font-weight:bold;font-size:16px}
+.top-nav span{cursor:pointer;opacity:0.6}
+.top-nav span.active{opacity:1;border-bottom:2px solid #ff3b5c}
+
+/* 垂直滑動短影片主畫面 (TikTok Style) */
+.feed-container{flex:1;overflow-y:scroll;scroll-snap-type:y mandatory;height:100%;scrollbar-width:none}
+.feed-container::-webkit-scrollbar{display:none}
+.reel-card{width:100%;height:100vh;scroll-snap-align:start;position:relative;background:#000;display:flex;justify-content:center;align-items:center}
+.reel-media{width:100%;height:100%;object-fit:cover;position:absolute;top:0;left:0}
+.reel-video{width:100%;height:100%;border:none;position:absolute;top:0;left:0}
+.reel-overlay{position:absolute;bottom:70px;left:15px;right:80px;z-index:10;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
+.reel-author{font-weight:bold;font-size:16px;margin-bottom:6px}
+.reel-text{font-size:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+/* 右側互動按鈕列 */
+.action-bar{position:absolute;right:15px;bottom:90px;z-index:10;display:flex;flex-direction:column;align-items:center;gap:18px}
+.action-btn{background:none;border:none;color:#fff;display:flex;flex-direction:column;align-items:center;cursor:pointer;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,0.5)}
+.action-icon{width:42px;height:42px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;justify-content:center;align-items:center;font-size:20px;margin-bottom:3px;backdrop-filter:blur(5px)}
+.action-icon.liked{color:#ff3b5c;background:rgba(255,59,92,0.2)}
+.avatar-badge{width:45px;height:45px;border-radius:50%;border:2px solid #fff;object-fit:cover;margin-bottom:5px}
+
+/* 底部導覽列 */
+.bottom-nav{position:absolute;bottom:0;left:0;right:0;height:60px;background:#000;display:flex;justify-content:space-around;align-items:center;z-index:30;border-top:1px solid #222}
+.nav-item{background:none;border:none;color:#888;font-size:12px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
+.nav-item.active{color:#fff}
+.plus-btn{background:#ff3b5c;color:#fff;width:42px;height:28px;border-radius:8px;font-size:20px;font-weight:bold;display:flex;justify-content:center;align-items:center;border:none;cursor:pointer}
+
+/* 彈出視窗 (發文、留言、個人頁面) */
+.modal{position:absolute;inset:0;background:rgba(0,0,0,0.8);z-index:50;display:flex;flex-direction:column;justify-content:flex-end;backdrop-filter:blur(5px)}
+.modal-content{background:#1e1e24;padding:20px;border-radius:20px 20px 0 0;max-height:80vh;display:flex;flex-direction:column}
+input,textarea{width:100%;padding:12px;margin:8px 0;background:#121214;border:1px solid #333;border-radius:8px;color:#fff;font-size:15px}
+textarea{height:90px;resize:none}
+.btn-primary{background:#ff3b5c;color:#fff;border:none;padding:12px;border-radius:8px;font-weight:bold;cursor:pointer;margin-top:10px}
 .hidden{display:none!important}
 </style>
 </head>
 <body>
-<div class="container">
-  <div class="card">
-    <h1>TOGAHO (TGH)</h1>
-    <form id="postForm">
-      <textarea id="postContent" placeholder="今天想分享什麼貼文？" required></textarea>
-      <input type="text" id="imgUrl" placeholder="圖片網址 URL（選填）">
-      <input type="text" id="ytUrl" placeholder="輸入 YouTube 影片或 Shorts 短影音網址">
-      <div id="videoPreviewContainer" class="preview-box">
-        <div class="preview-title">🎬 YouTube 影片網頁即時預覽中：</div>
-        <div id="videoPreviewPlayer"></div>
-      </div>
-      <div class="math-box"><span>驗證碼：</span><span id="mathQuestion">出題中...</span></div>
-      <input type="number" id="mathAnswer" placeholder="請輸入答案" required>
-      <input type="hidden" id="num1"><input type="hidden" id="num2"><input type="hidden" id="operator">
-      <button type="submit">發布新帖子</button>
-    </form>
+<div class="app" id="app">
+  <!-- 頂端導航 -->
+  <div class="top-nav">
+    <span class="active">推薦</span>
   </div>
-  <h2>最新帖子</h2>
-  <div id="postList"></div>
-  <div class="card admin-section">
-    <h2>TGH ADMIN 管理員控制台</h2>
-    <button id="unlockAdminBtn" onclick="tryUnlockAdmin()" style="background:#50fa7b;color:#282a36">🔓 點擊驗證密碼並解鎖後台</button>
-    <div id="adminPanel" class="hidden">
-      <h3>搜尋使用者並查看他發過的所有短片</h3>
-      <input type="text" id="searchUser" placeholder="輸入使用者特徵碼搜尋...">
-      <button onclick="searchUser()">搜尋並撈取短片</button>
-      <div id="userSearchResults" style="margin-top:10px"></div>
-      <h3 style="margin-top:20px">精準懲處懲罰 (BAN)</h3>
-      <select id="banType"><option value="FEATURE">依瀏覽器特徵碼封鎖</option><option value="IP">依 IP 位址封鎖</option></select>
-      <input type="text" id="banTarget" placeholder="貼上要封鎖的特徵碼或 IP">
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px">
-        <input type="number" id="banDays" placeholder="天" value="0">
-        <input type="number" id="banMonths" placeholder="月" value="0">
-        <input type="number" id="banYears" placeholder="年" value="0">
-        <label style="display:flex;align-items:center;font-size:12px"><input type="checkbox" id="banPerm">永久</label>
+
+  <!-- 主畫面：TikTok 直立短影片/貼文串 -->
+  <div class="feed-container" id="feedContainer">
+    <div style="display:flex;justify-content:center;align-items:center;height:100%;color:#888">載入中...</div>
+  </div>
+
+  <!-- 聊天/訊息檢視頁面 -->
+  <div id="chatPage" class="modal hidden" style="justify-content:center;padding:20px;">
+    <div class="modal-content" style="height:70vh;border-radius:16px;">
+      <h3>💬 社群聊天室</h3>
+      <div style="flex:1;overflow-y:auto;margin:10px 0;border:1px solid #333;padding:10px;border-radius:8px;font-size:13px;color:#aaa;">
+        ( 聊天室功能開發中，目前可透過短影片與留言互動交流！ )
       </div>
-      <button onclick="submitBan()" style="background:#c53030">執行封鎖</button>
+      <button class="btn-primary" onclick="togglePage('chatPage', false)">關閉</button>
     </div>
+  </div>
+
+  <!-- 個人專頁 -->
+  <div id="profilePage" class="modal hidden" style="justify-content:center;padding:20px;">
+    <div class="modal-content" style="height:80vh;border-radius:16px;">
+      <div style="text-align:center;margin-bottom:15px;">
+        <img id="profileAvatar" src="" style="width:80px;height:80px;border-radius:50%;object-fit:cover;border:2px solid #ff3b5c;">
+        <h3 id="profileUsername" style="margin-top:8px;"></h3>
+        <p id="profileBio" style="font-size:13px;color:#aaa;margin-top:4px;"></p>
+        <button onclick="openEditProfile()" style="background:#333;color:#fff;border:none;padding:6px 15px;border-radius:15px;margin-top:8px;cursor:pointer;font-size:12px;">編輯個人資料</button>
+      </div>
+      <h4 style="border-bottom:1px solid #333;padding-bottom:5px;">我的貼文</h4>
+      <div id="myPostsList" style="flex:1;overflow-y:auto;margin-top:10px;"></div>
+      <button class="btn-primary" onclick="togglePage('profilePage', false)">關閉</button>
+    </div>
+  </div>
+
+  <!-- 留言抽屜 -->
+  <div id="commentModal" class="modal hidden">
+    <div class="modal-content">
+      <h3>留言區</h3>
+      <div id="commentList" style="flex:1;overflow-y:auto;max-height:40vh;margin:10px 0;"></div>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="commentInput" placeholder="留下你的評論..." style="margin:0;">
+        <button onclick="postComment()" style="width:80px;margin:0;background:#ff3b5c;border:none;border-radius:8px;color:#fff;font-weight:bold;">發布</button>
+      </div>
+      <button onclick="togglePage('commentModal', false)" style="background:none;border:none;color:#888;margin-top:10px;cursor:pointer;">關閉</button>
+    </div>
+  </div>
+
+  <!-- 發文抽屜 [+] -->
+  <div id="postModal" class="modal hidden">
+    <div class="modal-content">
+      <h3>發布新短片 / 貼文</h3>
+      <textarea id="postContent" placeholder="寫個精彩的標題或內容..."></textarea>
+      <input type="text" id="postImg" placeholder="圖片網址 (選填)">
+      <input type="text" id="postYt" placeholder="YouTube 影片或 Shorts 網址 (選填)">
+      <button class="btn-primary" onclick="createPost()">立即發布</button>
+      <button onclick="togglePage('postModal', false)" style="background:none;border:none;color:#888;margin-top:10px;cursor:pointer;">取消</button>
+    </div>
+  </div>
+
+  <!-- 底部導覽列 -->
+  <div class="bottom-nav">
+    <button class="nav-item active" onclick="switchNav(0)">🏠 推薦</button>
+    <button class="nav-item" onclick="togglePage('chatPage', true)">💬 聊天</button>
+    <button class="plus-btn" onclick="togglePage('postModal', true)">＋</button>
+    <button class="nav-item" onclick="openProfile()">👤 我的</button>
   </div>
 </div>
 
 <script>
-let featureToken = "", savedAdminKey = "";
+let currentUser = localStorage.getItem("tgh_user") || null;
+let currentPostIdForComment = null;
 
-function generateFeatureToken() {
-  if (!localStorage.getItem("tgh_feature")) {
-    localStorage.setItem("tgh_feature", "TGH-" + Math.random().toString(36).substr(2, 9).toUpperCase());
+function checkAuth() {
+  if (!currentUser) {
+    const u = prompt("請輸入您的會員帳號 (若無會自動註冊):");
+    if (u) {
+      const p = prompt("請輸入密碼:");
+      authenticateUser(u, p);
+    }
+  } else {
+    loadFeed();
   }
-  featureToken = localStorage.getItem("tgh_feature");
 }
-generateFeatureToken();
 
-function generateMath() {
-  const e = ["+", "-", "*"], t = Math.floor(11 * Math.random()), a = Math.floor(11 * Math.random()), n = e[Math.floor(Math.random() * e.length)];
-  document.getElementById("mathQuestion").innerText = t + " " + ("*" === n ? "×" : n) + " " + a + " = ?";
-  document.getElementById("num1").value = t;
-  document.getElementById("num2").value = a;
-  document.getElementById("operator").value = n;
+async function authenticateUser(username, password) {
+  let res = await fetch("/api/login", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({username, password})
+  });
+  if (res.ok) {
+    let data = await res.json();
+    currentUser = data.user.username;
+    localStorage.setItem("tgh_user", currentUser);
+    loadFeed();
+  } else {
+    let regRes = await fetch("/api/register", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({username, password})
+    });
+    if (regRes.ok) {
+      alert("註冊成功並已自動登入！");
+      currentUser = username;
+      localStorage.setItem("tgh_user", currentUser);
+      loadFeed();
+    } else {
+      alert("登入失敗，請重試");
+      checkAuth();
+    }
+  }
 }
-window.onload = function() { generateMath(); fetchPosts(); };
 
 function getYouTubeId(url) {
   if (!url) return "";
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|\/shorts\/)([^#\&\?]*).*/;
+  const regExp = /^.*(youtu.be\\/|v\\/|u\\/\\w\\/|embed\\/|watch\\?v=|\\&v=|\\/shorts\\/)([^#\\&\\?]*).*/;
   const match = url.match(regExp);
   return (match && match[2].length === 11) ? match[2] : "";
 }
 
-function formatYouTubeEmbed(url) {
-  const id = getYouTubeId(url);
-  return id ? '<iframe class="post-video" src="https://www.youtube.com/embed/' + id + '" allowfullscreen></iframe>' : "";
-}
+async function loadFeed() {
+  if (!currentUser) return checkAuth();
+  const res = await fetch("/api/posts?username=" + encodeURIComponent(currentUser));
+  const posts = await res.json();
+  const container = document.getElementById("feedContainer");
+  container.innerHTML = posts.length === 0 ? "<div style='display:flex;justify-content:center;align-items:center;height:100%;color:#888'>目前沒有短影片貼文，點擊下方 [+] 發布第一則吧！</div>" : "";
 
-document.getElementById("ytUrl").addEventListener("input", function() {
-  const url = this.value.trim();
-  const id = getYouTubeId(url);
-  const box = document.getElementById("videoPreviewContainer");
-  const player = document.getElementById("videoPreviewPlayer");
-  if (id) {
-    player.innerHTML = '<iframe class="post-video" src="https://www.youtube.com/embed/' + id + '" allowfullscreen></iframe>';
-    box.style.display = "block";
-  } else {
-    box.style.display = "none";
-  }
-});
-
-async function fetchPosts() {
-  const e = await fetch("/api/APIText?feature=" + featureToken);
-  if (403 === e.status) {
-    document.body.innerHTML = "你已被系統封鎖。";
-    return;
-  }
-  const t = await e.json(), a = document.getElementById("postList");
-  a.innerHTML = "";
-  t.forEach(function(item) {
-    const div = document.createElement("div");
-    div.className = "post-item";
-    
-    let imgTag = "";
-    if (item.image_url) {
-      imgTag = '<img class="post-img" src="' + item.image_url + '" alt="post image">';
+  posts.forEach(p => {
+    let mediaContent = "";
+    if (p.youtube_url) {
+      const ytId = getYouTubeId(p.youtube_url);
+      if (ytId) mediaContent = \`<iframe class="reel-video" src="https://www.youtube.com/embed/\${ytId}?autoplay=1&mute=1&loop=1" allow="autoplay"></iframe>\`;
+    } else if (p.image_url) {
+      mediaContent = \`<img class="reel-media" src="\${p.image_url}">\`;
+    } else {
+      mediaContent = \`<div class="reel-media" style="background:#202028;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;">\${p.content}</div>\`;
     }
-    
-    let ytTag = formatYouTubeEmbed(item.youtube_url);
-    let delBtn = savedAdminKey ? '<button class="ban-btn" onclick="blockPost(' + item.id + ')">封鎖此帖子</button>' : "";
-    
-    div.innerHTML = '<div class="post-text">' + item.content + '</div>' + imgTag + ytTag + '<div style="font-size:11px;color:#7c7c8a;margin-top:8px;">發布者特徵碼: ' + (item.feature || "TGH-USER") + '</div>' + delBtn;
-    a.appendChild(div);
+
+    const likedClass = p.is_liked > 0 ? "liked" : "";
+
+    container.innerHTML += \`
+      <div class="reel-card">
+        \${mediaContent}
+        <div class="reel-overlay">
+          <div class="reel-author">@\${p.username}</div>
+          <div class="reel-text">\${p.content}</div>
+        </div>
+        <div class="action-bar">
+          <img class="avatar-badge" src="\${p.avatar_url || 'https://picsum.photos/200'}">
+          <button class="action-btn" onclick="toggleLike(\${p.id})">
+            <div class="action-icon \${likedClass}">♥</div>
+            <span>\${p.like_count}</span>
+          </button>
+          <button class="action-btn" onclick="openComments(\${p.id})">
+            <div class="action-icon">💬</div>
+            <span>\${p.comment_count}</span>
+          </button>
+        </div>
+      </div>\`;
   });
 }
 
-document.getElementById("postForm").addEventListener("submit", async function(e) {
-  e.preventDefault();
-  const t = await fetch("/api/APIText", {
+async function toggleLike(postId) {
+  await fetch("/api/like", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      content: document.getElementById("postContent").value,
-      image_url: document.getElementById("imgUrl").value.trim() || null,
-      youtube_url: document.getElementById("ytUrl").value.trim() || null,
-      feature: featureToken,
-      num1: parseInt(document.getElementById("num1").value),
-      num2: parseInt(document.getElementById("num2").value),
-      operator: document.getElementById("operator").value,
-      userAnswer: parseInt(document.getElementById("mathAnswer").value)
-    })
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ postId, username: currentUser })
   });
-  if (t.ok) {
-    document.getElementById("postForm").reset();
-    document.getElementById("videoPreviewContainer").style.display = "none";
-    generateMath(); fetchPosts();
-  } else {
-    const err = await t.json();
-    alert("錯誤：" + err.error);
-    generateMath();
-  }
-});
+  loadFeed();
+}
 
-function tryUnlockAdmin() {
-  const e = prompt("請輸入 TGH 管理員密碼：");
-  if (e) {
-    savedAdminKey = e;
-    document.getElementById("adminPanel").classList.remove("hidden");
-    document.getElementById("unlockAdminBtn").classList.add("hidden");
-    fetchPosts();
+async function openComments(postId) {
+  currentPostIdForComment = postId;
+  togglePage('commentModal', true);
+  const res = await fetch("/api/comments?postId=" + postId);
+  const comments = await res.json();
+  const list = document.getElementById("commentList");
+  list.innerHTML = comments.length === 0 ? "<p style='color:#777;text-align:center;'>還沒有人留言，搶頭香吧！</p>" : "";
+  comments.forEach(c => {
+    list.innerHTML += \`<div style="margin-bottom:10px;font-size:13px;"><b style="color:#ff3b5c">@\${c.username}:</b> \${c.content}</div>\`;
+  });
+}
+
+async function postComment() {
+  const content = document.getElementById("commentInput").value;
+  if (!content) return;
+  await fetch("/api/comments", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ postId: currentPostIdForComment, username: currentUser, content })
+  });
+  document.getElementById("commentInput").value = "";
+  openComments(currentPostIdForComment);
+  loadFeed();
+}
+
+async function createPost() {
+  const content = document.getElementById("postContent").value;
+  const image_url = document.getElementById("postImg").value;
+  const youtube_url = document.getElementById("postYt").value;
+  const res = await fetch("/api/posts", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ username: currentUser, content, image_url, youtube_url })
+  });
+  if (res.ok) {
+    togglePage('postModal', false);
+    document.getElementById("postContent").value = "";
+    document.getElementById("postImg").value = "";
+    document.getElementById("postYt").value = "";
+    loadFeed();
   }
 }
 
-async function searchUser() {
-  const sVal = document.getElementById("searchUser").value;
-  const t = await fetch("/api/APIText?action=search&pwd=" + encodeURIComponent(savedAdminKey) + "&query=" + encodeURIComponent(sVal) + "&myFeature=" + featureToken);
-  const a = await t.json(), n = document.getElementById("userSearchResults");
-  if (!t.ok) { n.innerText = a.error; return; }
-  n.innerHTML = a.length === 0 ? "找不到符合的使用者（已自動篩除你自身）。" : "";
+async function openProfile() {
+  togglePage('profilePage', true);
+  const res = await fetch("/api/profile?username=" + encodeURIComponent(currentUser));
+  const data = await res.json();
+  document.getElementById("profileAvatar").src = data.user.avatar_url || 'https://picsum.photos/200';
+  document.getElementById("profileUsername").innerText = "@" + data.user.username;
+  document.getElementById("profileBio").innerText = data.user.bio || "尚無簡介";
   
-  a.forEach(function(u) {
-    const videoEmbed = formatYouTubeEmbed(u.youtube_url) || '<div style="font-size:12px;color:#888;">此貼文無影片</div>';
-    n.innerHTML += '<div style="background:#121214;padding:10px;border-radius:8px;margin-top:8px;border:1px solid #333;">' +
-                   '<div style="font-size:12px;color:#00875f;">使用者特徵碼: ' + u.feature + '</div>' +
-                   '<div style="margin:5px 0;">貼文內容: ' + u.content + '</div>' +
-                   videoEmbed +
-                   '<button class="ban-btn" style="margin-top:8px;" onclick="blockPost(' + u.id + ')">直接下架這篇</button>' +
-                   '<button class="ban-btn" style="background:#00875f;margin-left:5px;" onclick="unbanUser(\'' + u.feature + '\')">🔓 解除封鎖</button>' +
-                   '</div>';
+  const myPosts = document.getElementById("myPostsList");
+  myPosts.innerHTML = "";
+  data.posts.forEach(p => {
+    myPosts.innerHTML += \`<div style="background:#121214;padding:10px;margin-bottom:8px;border-radius:8px;font-size:13px;">\${p.content}</div>\`;
   });
 }
 
-async function submitBan() {
-  const e = await fetch("/api/APIText?action=ban", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      pwd: savedAdminKey,
-      target: document.getElementById("banTarget").value,
-      type: document.getElementById("banType").value,
-      days: parseInt(document.getElementById("banDays").value) || 0,
-      months: parseInt(document.getElementById("banMonths").value) || 0,
-      years: parseInt(document.getElementById("banYears").value) || 0,
-      is_perm: document.getElementById("banPerm").checked
-    })
-  });
-  const t = await e.json(); alert(t.message || t.error);
-}
-
-async function blockPost(e) {
-  const t = await fetch("/api/APIText?action=block-post", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pwd: savedAdminKey, id: e })
-  });
-  if (t.ok) {
-    alert("該帖子已封鎖隱藏！"); fetchPosts();
-    const sVal = document.getElementById("searchUser").value;
-    if (sVal) searchUser();
-  } else {
-    const err = await t.json(); alert(err.error);
+async function openEditProfile() {
+  const newBio = prompt("請輸入新的個人簡介：", "");
+  const newAvatar = prompt("請輸入新的頭貼圖片網址：", "");
+  if (newBio !== null) {
+    await fetch("/api/profile", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ username: currentUser, bio: newBio, avatar_url: newAvatar || undefined })
+    });
+    openProfile();
   }
 }
 
-async function unbanUser(targetFeature) {
-  const t = await fetch("/api/APIText?action=unban", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pwd: savedAdminKey, target: targetFeature })
-  });
-  const data = await t.json();
-  alert(data.message || data.error);
+function togglePage(pageId, show) {
+  const el = document.getElementById(pageId);
+  if (show) el.classList.remove("hidden");
+  else el.classList.add("hidden");
 }
+
+function switchNav(idx) {}
+
+window.onload = checkAuth;
 </script>
 </body>
 </html>`;
 
-    return new Response(html, {
-      headers: { "Content-Type": "text/html;charset=UTF-8" }
-    });
+    return new Response(html, { headers: { "Content-Type": "text/html;charset=UTF-8" } });
   }
 };
