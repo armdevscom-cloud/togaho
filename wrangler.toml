@@ -1,0 +1,8 @@
+name = "togaho-social"
+main = "worker.js"
+compatibility_date = "2026-03-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tgh-db"
+database_id = "cc7706f8-8140-4523-b03c-9b38b0f6ea02"
