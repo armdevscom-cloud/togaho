@@ -22,9 +22,10 @@ export default {
       
       // 註冊
       if (url.pathname === "/api/register" && request.method === "POST") {
-        const { username, password } = await request.json();
-        if (!username || !password) return new Response(JSON.stringify({error:"請輸入帳號與密碼"}), {status:400});
         try {
+          const { username, password } = await request.json();
+          if (!username || !password) return new Response(JSON.stringify({error:"請輸入帳號與密碼"}), {status:400});
+          
           const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
           const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
           const userCount = await env.DB.prepare("SELECT COUNT(*) as cnt FROM users").first();
@@ -34,7 +35,7 @@ export default {
           await env.DB.prepare("INSERT INTO users (username, password_hash, role, avatar_url, bio) VALUES (?, ?, ?, ?, ?)").bind(username, passwordHash, role, defaultAvatar, "這人很懶，什麼都沒有留下...").run();
           return new Response(JSON.stringify({message:"註冊成功"}), {status:200});
         } catch(e) {
-          return new Response(JSON.stringify({error:"帳號已被註冊"}), {status:400});
+          return new Response(JSON.stringify({error:"帳號已被註冊或伺服器錯誤: " + e.message}), {status:400});
         }
       }
 
@@ -62,7 +63,7 @@ export default {
         return new Response(JSON.stringify({error:"Admin Key 錯誤或已過期"}), {status:400});
       }
 
-      // 取得動態牆
+      // 取得動態牆 (已修正 SQL 中的 && 為 AND)
       if (url.pathname === "/api/posts" && request.method === "GET") {
         const username = url.searchParams.get("username") || "";
         const { results: posts } = await env.DB.prepare(`
@@ -246,8 +247,9 @@ if (currentUser) {
 }
 
 async function handleLogin() {
-  const username = document.getElementById("authUsername").value;
-  const password = document.getElementById("authPassword").value;
+  const username = document.getElementById("authUsername").value.trim();
+  const password = document.getElementById("authPassword").value.trim();
+
   if(!username || !password) return alert("請輸入帳號與密碼");
 
   let res = await fetch("/api/login", {
@@ -255,8 +257,9 @@ async function handleLogin() {
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({username, password})
   });
+  
+  let data = await res.json();
   if(res.ok) {
-    let data = await res.json();
     currentUser = data.user.username;
     currentRole = data.user.role;
     localStorage.setItem("tgh_user", currentUser);
@@ -264,13 +267,14 @@ async function handleLogin() {
     document.getElementById("authModal").classList.add("hidden");
     loadFeed();
   } else {
-    alert("帳號或密碼錯誤");
+    alert("登入失敗：" + (data.error || "未知錯誤"));
   }
 }
 
 async function handleRegister() {
-  const username = document.getElementById("authUsername").value;
-  const password = document.getElementById("authPassword").value;
+  const username = document.getElementById("authUsername").value.trim();
+  const password = document.getElementById("authPassword").value.trim();
+
   if(!username || !password) return alert("請輸入帳號與密碼");
 
   let res = await fetch("/api/register", {
@@ -278,12 +282,13 @@ async function handleRegister() {
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({username, password})
   });
+  
+  let data = await res.json();
   if(res.ok) {
     alert("註冊成功！已自動為您登入");
     handleLogin();
   } else {
-    let err = await res.json();
-    alert(err.error || "註冊失敗");
+    alert("註冊失敗：" + (data.error || "未知錯誤"));
   }
 }
 
@@ -327,7 +332,7 @@ function logout() {
 
 function getYouTubeId(url) {
   if (!url) return "";
-  const regExp = /^.*(youtu.be\\/|v\\/|u\\/\\w\\/|embed\\/|watch\\?v=|\\&v=|\\/shorts\\/)([^#\\&\\?]*).*/;
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|\/shorts\/)([^#\&\?]*).*/;
   const match = url.match(regExp);
   return (match && match[2].length === 11) ? match[2] : "";
 }
