@@ -8,7 +8,7 @@ export default {
     try {
       const isBanned = await env.DB.prepare("SELECT * FROM banned_users WHERE target_value = ? AND banned_until > ?").bind(clientIP, nowStr).first();
       if (isBanned) {
-        return new Response(`<html><body style="background:#000;color:#ff5555;text-align:center;padding-top:100px;font-family:sans-serif;"><h1>帳號或 IP 已被系統封鎖</h1><p>到期時間：${isBanned.banned_until}</p></body></html>`, {
+        return new Response("<html><body style='background:#000;color:#ff5555;text-align:center;padding-top:100px;font-family:sans-serif;'><h1>帳號或 IP 已被系統封鎖</h1><p>到期時間：" + isBanned.banned_until + "</p></body></html>", {
           headers: { "Content-Type": "text/html;charset=UTF-8" },
           status: 403
         });
@@ -51,7 +51,7 @@ export default {
       // Admin Key 升級驗證
       if (url.pathname === "/api/admin-access" && request.method === "POST") {
         const { username, key } = await request.json();
-        const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        const todayStr = new Date().toISOString().slice(0, 10);
         const expectedKey = todayStr + "TGHAdmin";
         
         if (key === expectedKey) {
@@ -68,7 +68,7 @@ export default {
         const { results: posts } = await env.DB.prepare(`
           SELECT p.*, u.avatar_url,
           (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) as like_count,
-          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id && l.username = ?) as is_liked,
+          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id AND l.username = ?) as is_liked,
           (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) as comment_count
           FROM posts p 
           LEFT JOIN users u ON p.username = u.username 
@@ -123,7 +123,7 @@ export default {
     }
 
     // ----------------------------------------------------
-    // 【前端 TikTok 風格介面與登入/Admin面板】
+    // 【前端 TikTok 風格介面】
     // ----------------------------------------------------
     const html = `<!DOCTYPE html>
 <html lang="zh-TW">
@@ -135,17 +135,11 @@ export default {
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,sans-serif;background:#000;color:#fff;overflow:hidden;height:100vh;display:flex;justify-content:center}
 .app{width:100%;max-width:480px;height:100vh;background:#121214;position:relative;display:flex;flex-direction:column}
-
-/* 登入註冊遮罩畫面 */
 #authModal{position:absolute;inset:0;background:#121214;z-index:100;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:25px}
 .auth-box{width:100%;background:#1e1e24;padding:25px;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
 .auth-title{text-align:center;font-size:22px;font-weight:bold;margin-bottom:20px;color:#ff3b5c}
-
-/* Admin 面板樣式 (位於登入下方) */
 .admin-section{margin-top:20px;border-top:1px dashed #333;padding-top:15px}
-.admin-title{font-size:13px;color:#f39c12;font-weight:bold;margin-bottom:8px;display:flex;align-items:center;gap:5px}
-
-/* 頂端與動態牆 */
+.admin-title{font-size:13px;color:#f39c12;font-weight:bold;margin-bottom:8px}
 .top-nav{position:absolute;top:0;left:0;right:0;height:50px;display:flex;justify-content:center;align-items:center;z-index:20;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);font-weight:bold;font-size:16px}
 .feed-container{flex:1;overflow-y:scroll;scroll-snap-type:y mandatory;height:100%;scrollbar-width:none}
 .feed-container::-webkit-scrollbar{display:none}
@@ -155,17 +149,14 @@ body{font-family:-apple-system,sans-serif;background:#000;color:#fff;overflow:hi
 .reel-overlay{position:absolute;bottom:70px;left:15px;right:80px;z-index:10;text-shadow:0 1px 3px rgba(0,0,0,0.8)}
 .reel-author{font-weight:bold;font-size:16px;margin-bottom:6px}
 .reel-text{font-size:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-
 .action-bar{position:absolute;right:15px;bottom:90px;z-index:10;display:flex;flex-direction:column;align-items:center;gap:18px}
 .action-btn{background:none;border:none;color:#fff;display:flex;flex-direction:column;align-items:center;cursor:pointer;font-size:12px}
 .action-icon{width:42px;height:42px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;justify-content:center;align-items:center;font-size:20px;margin-bottom:3px;backdrop-filter:blur(5px)}
 .action-icon.liked{color:#ff3b5c;background:rgba(255,59,92,0.2)}
 .avatar-badge{width:45px;height:45px;border-radius:50%;border:2px solid #fff;object-fit:cover;margin-bottom:5px}
-
 .bottom-nav{position:absolute;bottom:0;left:0;right:0;height:60px;background:#000;display:flex;justify-content:space-around;align-items:center;z-index:30;border-top:1px solid #222}
 .nav-item{background:none;border:none;color:#888;font-size:12px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
 .plus-btn{background:#ff3b5c;color:#fff;width:42px;height:28px;border-radius:8px;font-size:20px;font-weight:bold;display:flex;justify-content:center;align-items:center;border:none;cursor:pointer}
-
 .modal{position:absolute;inset:0;background:rgba(0,0,0,0.8);z-index:50;display:flex;flex-direction:column;justify-content:flex-end;backdrop-filter:blur(5px)}
 .modal-content{background:#1e1e24;padding:20px;border-radius:20px 20px 0 0;max-height:80vh;display:flex;flex-direction:column}
 input,textarea{width:100%;padding:12px;margin:8px 0;background:#121214;border:1px solid #333;border-radius:8px;color:#fff;font-size:15px}
@@ -177,8 +168,6 @@ textarea{height:90px;resize:none}
 </head>
 <body>
 <div class="app" id="app">
-
-  <!-- 登入 / 註冊與 Admin 面板畫面 -->
   <div id="authModal">
     <div class="auth-box">
       <div class="auth-title">TOGAHO 影音社群</div>
@@ -186,8 +175,6 @@ textarea{height:90px;resize:none}
       <input type="password" id="authPassword" placeholder="輸入密碼">
       <button class="btn-primary" onclick="handleLogin()">登入</button>
       <button class="btn-secondary" onclick="handleRegister()">註冊新帳號</button>
-
-      <!-- Admin 面板區塊 -->
       <div class="admin-section">
         <div class="admin-title">👑 Admin 管理員專區</div>
         <input type="text" id="adminKeyInput" placeholder="請輸入或取得 Admin Key" style="font-size:13px;">
@@ -202,7 +189,6 @@ textarea{height:90px;resize:none}
   <div class="top-nav">推薦</div>
   <div class="feed-container" id="feedContainer"></div>
 
-  <!-- 個人專頁 -->
   <div id="profilePage" class="modal hidden" style="justify-content:center;padding:20px;">
     <div class="modal-content" style="height:80vh;border-radius:16px;">
       <div style="text-align:center;margin-bottom:15px;">
@@ -218,7 +204,6 @@ textarea{height:90px;resize:none}
     </div>
   </div>
 
-  <!-- 留言抽屜 -->
   <div id="commentModal" class="modal hidden">
     <div class="modal-content">
       <h3>留言區</h3>
@@ -231,7 +216,6 @@ textarea{height:90px;resize:none}
     </div>
   </div>
 
-  <!-- 發文抽屜 -->
   <div id="postModal" class="modal hidden">
     <div class="modal-content">
       <h3>發布新短片 / 貼文</h3>
@@ -243,10 +227,9 @@ textarea{height:90px;resize:none}
     </div>
   </div>
 
-  <!-- 底部導覽列 -->
   <div class="bottom-nav">
-    <button class="nav-item active" onclick="switchNav(0)">🏠 推薦</button>
-    <button class="nav-item" onclick="togglePage('chatPage', true)">💬 聊天</button>
+    <button class="nav-item active">🏠 推薦</button>
+    <button class="nav-item" onclick="alert('聊天室功能建置中')">💬 聊天</button>
     <button class="plus-btn" onclick="togglePage('postModal', true)">＋</button>
     <button class="nav-item" onclick="openProfile()">👤 我的</button>
   </div>
@@ -304,15 +287,12 @@ async function handleRegister() {
   }
 }
 
-// 產生並填入 Admin Key (格式: 日期 + TGH + Admin)
 function requestAdminKey() {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const key = today + "TGHAdmin";
-  document.getElementById("adminKeyInput").value = key;
-  alert("已成功向系統請求今日 Admin Key！");
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById("adminKeyInput").value = today + "TGHAdmin";
+  alert("已成功產生今日 Admin Key！");
 }
 
-// 驗證 Admin Key 並升級權限
 async function verifyAdminKey() {
   const username = document.getElementById("authUsername").value;
   const key = document.getElementById("adminKeyInput").value;
@@ -347,7 +327,7 @@ function logout() {
 
 function getYouTubeId(url) {
   if (!url) return "";
-  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|\/shorts\/)([^#\&\?]*).*/;
+  const regExp = /^.*(youtu.be\\/|v\\/|u\\/\\w\\/|embed\\/|watch\\?v=|\\&v=|\\/shorts\\/)([^#\\&\\?]*).*/;
   const match = url.match(regExp);
   return (match && match[2].length === 11) ? match[2] : "";
 }
@@ -362,34 +342,16 @@ async function loadFeed() {
     let mediaContent = "";
     if (p.youtube_url) {
       const ytId = getYouTubeId(p.youtube_url);
-      if (ytId) mediaContent = `<iframe class="reel-video" src="https://www.youtube.com/embed/${ytId}?autoplay=1&mute=1&loop=1" allow="autoplay"></iframe>`;
+      if (ytId) mediaContent = '<iframe class="reel-video" src="https://www.youtube.com/embed/' + ytId + '?autoplay=1&mute=1&loop=1" allow="autoplay"></iframe>';
     } else if (p.image_url) {
-      mediaContent = `<img class="reel-media" src="${p.image_url}">`;
+      mediaContent = '<img class="reel-media" src="' + p.image_url + '">';
     } else {
-      mediaContent = `<div class="reel-media" style="background:#202028;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;">${p.content}</div>`;
+      mediaContent = '<div class="reel-media" style="background:#202028;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;">' + p.content + '</div>';
     }
 
     const likedClass = p.is_liked > 0 ? "liked" : "";
 
-    container.innerHTML += `
-      <div class="reel-card">
-        ${mediaContent}
-        <div class="reel-overlay">
-          <div class="reel-author">@${p.username}</div>
-          <div class="reel-text">${p.content}</div>
-        </div>
-        <div class="action-bar">
-          <img class="avatar-badge" src="${p.avatar_url || 'https://picsum.photos/200'}">
-          <button class="action-btn" onclick="toggleLike(${p.id})">
-            <div class="action-icon ${likedClass}">♥</div>
-            <span>${p.like_count}</span>
-          </button>
-          <button class="action-btn" onclick="openComments(${p.id})">
-            <div class="action-icon">💬</div>
-            <span>${p.comment_count}</span>
-          </button>
-        </div>
-      </div>`;
+    container.innerHTML += '<div class="reel-card">' + mediaContent + '<div class="reel-overlay"><div class="reel-author">@' + p.username + '</div><div class="reel-text">' + p.content + '</div></div><div class="action-bar"><img class="avatar-badge" src="' + (p.avatar_url || 'https://picsum.photos/200') + '"><button class="action-btn" onclick="toggleLike(' + p.id + ')"><div class="action-icon ' + likedClass + '">♥</div><span>' + p.like_count + '</span></button><button class="action-btn" onclick="openComments(' + p.id + ')"><div class="action-icon">💬</div><span>' + p.comment_count + '</span></button></div></div>';
   });
 }
 
@@ -410,7 +372,7 @@ async function openComments(postId) {
   const list = document.getElementById("commentList");
   list.innerHTML = comments.length === 0 ? "<p style='color:#777;text-align:center;'>還沒有人留言，搶頭香吧！</p>" : "";
   comments.forEach(c => {
-    list.innerHTML += `<div style="margin-bottom:10px;font-size:13px;"><b style="color:#ff3b5c">@${c.username}:</b> ${c.content}</div>`;
+    list.innerHTML += '<div style="margin-bottom:10px;font-size:13px;"><b style="color:#ff3b5c">@' + c.username + ':</b> ' + c.content + '</div>';
   });
 }
 
@@ -457,7 +419,7 @@ async function openProfile() {
   const myPosts = document.getElementById("myPostsList");
   myPosts.innerHTML = "";
   data.posts.forEach(p => {
-    myPosts.innerHTML += `<div style="background:#121214;padding:10px;margin-bottom:8px;border-radius:8px;font-size:13px;">${p.content}</div>`;
+    myPosts.innerHTML += '<div style="background:#121214;padding:10px;margin-bottom:8px;border-radius:8px;font-size:13px;">' + p.content + '</div>';
   });
 }
 
@@ -466,8 +428,6 @@ function togglePage(pageId, show) {
   if (show) el.classList.remove("hidden");
   else el.classList.add("hidden");
 }
-
-function switchNav(idx) {}
 </script>
 </body>
 </html>`;
