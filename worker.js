@@ -48,13 +48,27 @@ export default {
         return new Response(JSON.stringify({message:"登入成功", user}), {status:200});
       }
 
-      // 取得動態牆 (包含貼文、作者頭貼、按讚數、留言數)
+      // Admin Key 升級驗證
+      if (url.pathname === "/api/admin-access" && request.method === "POST") {
+        const { username, key } = await request.json();
+        const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        const expectedKey = todayStr + "TGHAdmin";
+        
+        if (key === expectedKey) {
+          await env.DB.prepare("UPDATE users SET role = 'admin' WHERE username = ?").bind(username).run();
+          const updatedUser = await env.DB.prepare("SELECT * FROM users WHERE username = ?").bind(username).first();
+          return new Response(JSON.stringify({message:"升級管理員成功", user: updatedUser}), {status:200});
+        }
+        return new Response(JSON.stringify({error:"Admin Key 錯誤或已過期"}), {status:400});
+      }
+
+      // 取得動態牆
       if (url.pathname === "/api/posts" && request.method === "GET") {
         const username = url.searchParams.get("username") || "";
         const { results: posts } = await env.DB.prepare(`
           SELECT p.*, u.avatar_url,
           (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id) as like_count,
-          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id AND l.username = ?) as is_liked,
+          (SELECT COUNT(*) FROM likes l WHERE l.post_id = p.id && l.username = ?) as is_liked,
           (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id) as comment_count
           FROM posts p 
           LEFT JOIN users u ON p.username = u.username 
@@ -71,7 +85,7 @@ export default {
         return new Response(JSON.stringify({message:"發布成功"}), {status:200});
       }
 
-      // 按讚 / 收回讚
+      // 按讚
       if (url.pathname === "/api/like" && request.method === "POST") {
         const { postId, username } = await request.json();
         const existing = await env.DB.prepare("SELECT * FROM likes WHERE post_id = ? AND username = ?").bind(postId, username).first();
@@ -99,24 +113,17 @@ export default {
         return new Response(JSON.stringify({message:"留言成功"}), {status:200});
       }
 
-      // 取得個人資料與貼文
+      // 個人資料
       if (url.pathname === "/api/profile" && request.method === "GET") {
         const username = url.searchParams.get("username");
         const user = await env.DB.prepare("SELECT username, role, avatar_url, bio, created_at FROM users WHERE username = ?").bind(username).first();
         const { results: posts } = await env.DB.prepare("SELECT * FROM posts WHERE username = ? AND is_blocked = 0 ORDER BY id DESC").bind(username).all();
         return new Response(JSON.stringify({ user, posts }), {headers:{"Content-Type":"application/json"}});
       }
-
-      // 更新個人簡介與頭貼
-      if (url.pathname === "/api/profile" && request.method === "POST") {
-        const { username, avatar_url, bio } = await request.json();
-        await env.DB.prepare("UPDATE users SET avatar_url = ?, bio = ? WHERE username = ?").bind(avatar_url, bio, username).run();
-        return new Response(JSON.stringify({message:"更新成功"}), {status:200});
-      }
     }
 
     // ----------------------------------------------------
-    // 【前端 TikTok 風格介面】
+    // 【前端 TikTok 風格介面與登入/Admin面板】
     // ----------------------------------------------------
     const html = `<!DOCTYPE html>
 <html lang="zh-TW">
@@ -129,12 +136,17 @@ export default {
 body{font-family:-apple-system,sans-serif;background:#000;color:#fff;overflow:hidden;height:100vh;display:flex;justify-content:center}
 .app{width:100%;max-width:480px;height:100vh;background:#121214;position:relative;display:flex;flex-direction:column}
 
-/* 頂端導航列 */
-.top-nav{position:absolute;top:0;left:0;right:0;height:50px;display:flex;justify-content:center;align-items:center;gap:20px;z-index:20;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);font-weight:bold;font-size:16px}
-.top-nav span{cursor:pointer;opacity:0.6}
-.top-nav span.active{opacity:1;border-bottom:2px solid #ff3b5c}
+/* 登入註冊遮罩畫面 */
+#authModal{position:absolute;inset:0;background:#121214;z-index:100;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:25px}
+.auth-box{width:100%;background:#1e1e24;padding:25px;border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,0.5)}
+.auth-title{text-align:center;font-size:22px;font-weight:bold;margin-bottom:20px;color:#ff3b5c}
 
-/* 垂直滑動短影片主畫面 (TikTok Style) */
+/* Admin 面板樣式 (位於登入下方) */
+.admin-section{margin-top:20px;border-top:1px dashed #333;padding-top:15px}
+.admin-title{font-size:13px;color:#f39c12;font-weight:bold;margin-bottom:8px;display:flex;align-items:center;gap:5px}
+
+/* 頂端與動態牆 */
+.top-nav{position:absolute;top:0;left:0;right:0;height:50px;display:flex;justify-content:center;align-items:center;z-index:20;background:linear-gradient(to bottom,rgba(0,0,0,0.7),transparent);font-weight:bold;font-size:16px}
 .feed-container{flex:1;overflow-y:scroll;scroll-snap-type:y mandatory;height:100%;scrollbar-width:none}
 .feed-container::-webkit-scrollbar{display:none}
 .reel-card{width:100%;height:100vh;scroll-snap-align:start;position:relative;background:#000;display:flex;justify-content:center;align-items:center}
@@ -144,50 +156,51 @@ body{font-family:-apple-system,sans-serif;background:#000;color:#fff;overflow:hi
 .reel-author{font-weight:bold;font-size:16px;margin-bottom:6px}
 .reel-text{font-size:14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
-/* 右側互動按鈕列 */
 .action-bar{position:absolute;right:15px;bottom:90px;z-index:10;display:flex;flex-direction:column;align-items:center;gap:18px}
-.action-btn{background:none;border:none;color:#fff;display:flex;flex-direction:column;align-items:center;cursor:pointer;font-size:12px;text-shadow:0 1px 2px rgba(0,0,0,0.5)}
+.action-btn{background:none;border:none;color:#fff;display:flex;flex-direction:column;align-items:center;cursor:pointer;font-size:12px}
 .action-icon{width:42px;height:42px;background:rgba(255,255,255,0.2);border-radius:50%;display:flex;justify-content:center;align-items:center;font-size:20px;margin-bottom:3px;backdrop-filter:blur(5px)}
 .action-icon.liked{color:#ff3b5c;background:rgba(255,59,92,0.2)}
 .avatar-badge{width:45px;height:45px;border-radius:50%;border:2px solid #fff;object-fit:cover;margin-bottom:5px}
 
-/* 底部導覽列 */
 .bottom-nav{position:absolute;bottom:0;left:0;right:0;height:60px;background:#000;display:flex;justify-content:space-around;align-items:center;z-index:30;border-top:1px solid #222}
 .nav-item{background:none;border:none;color:#888;font-size:12px;cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:2px}
-.nav-item.active{color:#fff}
 .plus-btn{background:#ff3b5c;color:#fff;width:42px;height:28px;border-radius:8px;font-size:20px;font-weight:bold;display:flex;justify-content:center;align-items:center;border:none;cursor:pointer}
 
-/* 彈出視窗 (發文、留言、個人頁面) */
 .modal{position:absolute;inset:0;background:rgba(0,0,0,0.8);z-index:50;display:flex;flex-direction:column;justify-content:flex-end;backdrop-filter:blur(5px)}
 .modal-content{background:#1e1e24;padding:20px;border-radius:20px 20px 0 0;max-height:80vh;display:flex;flex-direction:column}
 input,textarea{width:100%;padding:12px;margin:8px 0;background:#121214;border:1px solid #333;border-radius:8px;color:#fff;font-size:15px}
 textarea{height:90px;resize:none}
-.btn-primary{background:#ff3b5c;color:#fff;border:none;padding:12px;border-radius:8px;font-weight:bold;cursor:pointer;margin-top:10px}
+.btn-primary{background:#ff3b5c;color:#fff;border:none;padding:12px;border-radius:8px;font-weight:bold;cursor:pointer;width:100%;margin-top:10px}
+.btn-secondary{background:#333;color:#fff;border:none;padding:10px;border-radius:8px;font-weight:bold;cursor:pointer;width:100%;margin-top:5px;font-size:13px}
 .hidden{display:none!important}
 </style>
 </head>
 <body>
 <div class="app" id="app">
-  <!-- 頂端導航 -->
-  <div class="top-nav">
-    <span class="active">推薦</span>
-  </div>
 
-  <!-- 主畫面：TikTok 直立短影片/貼文串 -->
-  <div class="feed-container" id="feedContainer">
-    <div style="display:flex;justify-content:center;align-items:center;height:100%;color:#888">載入中...</div>
-  </div>
+  <!-- 登入 / 註冊與 Admin 面板畫面 -->
+  <div id="authModal">
+    <div class="auth-box">
+      <div class="auth-title">TOGAHO 影音社群</div>
+      <input type="text" id="authUsername" placeholder="輸入帳號">
+      <input type="password" id="authPassword" placeholder="輸入密碼">
+      <button class="btn-primary" onclick="handleLogin()">登入</button>
+      <button class="btn-secondary" onclick="handleRegister()">註冊新帳號</button>
 
-  <!-- 聊天/訊息檢視頁面 -->
-  <div id="chatPage" class="modal hidden" style="justify-content:center;padding:20px;">
-    <div class="modal-content" style="height:70vh;border-radius:16px;">
-      <h3>💬 社群聊天室</h3>
-      <div style="flex:1;overflow-y:auto;margin:10px 0;border:1px solid #333;padding:10px;border-radius:8px;font-size:13px;color:#aaa;">
-        ( 聊天室功能開發中，目前可透過短影片與留言互動交流！ )
+      <!-- Admin 面板區塊 -->
+      <div class="admin-section">
+        <div class="admin-title">👑 Admin 管理員專區</div>
+        <input type="text" id="adminKeyInput" placeholder="請輸入或取得 Admin Key" style="font-size:13px;">
+        <div style="display:flex;gap:8px;">
+          <button class="btn-secondary" onclick="requestAdminKey()" style="background:#444;">要求 Key</button>
+          <button class="btn-secondary" onclick="verifyAdminKey()" style="background:#f39c12;color:#000;">驗證升級 Admin</button>
+        </div>
       </div>
-      <button class="btn-primary" onclick="togglePage('chatPage', false)">關閉</button>
     </div>
   </div>
+
+  <div class="top-nav">推薦</div>
+  <div class="feed-container" id="feedContainer"></div>
 
   <!-- 個人專頁 -->
   <div id="profilePage" class="modal hidden" style="justify-content:center;padding:20px;">
@@ -195,8 +208,9 @@ textarea{height:90px;resize:none}
       <div style="text-align:center;margin-bottom:15px;">
         <img id="profileAvatar" src="" style="width:80px;height:80px;border-radius:50%;object-fit:cover;border:2px solid #ff3b5c;">
         <h3 id="profileUsername" style="margin-top:8px;"></h3>
+        <p id="profileRole" style="font-size:12px;color:#f39c12;margin-top:2px;"></p>
         <p id="profileBio" style="font-size:13px;color:#aaa;margin-top:4px;"></p>
-        <button onclick="openEditProfile()" style="background:#333;color:#fff;border:none;padding:6px 15px;border-radius:15px;margin-top:8px;cursor:pointer;font-size:12px;">編輯個人資料</button>
+        <button onclick="logout()" style="background:#333;color:#ff5555;border:none;padding:6px 15px;border-radius:15px;margin-top:8px;cursor:pointer;font-size:12px;">登出帳號</button>
       </div>
       <h4 style="border-bottom:1px solid #333;padding-bottom:5px;">我的貼文</h4>
       <div id="myPostsList" style="flex:1;overflow-y:auto;margin-top:10px;"></div>
@@ -217,13 +231,13 @@ textarea{height:90px;resize:none}
     </div>
   </div>
 
-  <!-- 發文抽屜 [+] -->
+  <!-- 發文抽屜 -->
   <div id="postModal" class="modal hidden">
     <div class="modal-content">
       <h3>發布新短片 / 貼文</h3>
       <textarea id="postContent" placeholder="寫個精彩的標題或內容..."></textarea>
       <input type="text" id="postImg" placeholder="圖片網址 (選填)">
-      <input type="text" id="postYt" placeholder="YouTube 影片或 Shorts 網址 (選填)">
+      <input type="text" id="postYt" placeholder="YouTube Shorts 網址 (選填)">
       <button class="btn-primary" onclick="createPost()">立即發布</button>
       <button onclick="togglePage('postModal', false)" style="background:none;border:none;color:#888;margin-top:10px;cursor:pointer;">取消</button>
     </div>
@@ -240,58 +254,105 @@ textarea{height:90px;resize:none}
 
 <script>
 let currentUser = localStorage.getItem("tgh_user") || null;
+let currentRole = localStorage.getItem("tgh_role") || "user";
 let currentPostIdForComment = null;
 
-function checkAuth() {
-  if (!currentUser) {
-    const u = prompt("請輸入您的會員帳號 (若無會自動註冊):");
-    if (u) {
-      const p = prompt("請輸入密碼:");
-      authenticateUser(u, p);
-    }
-  } else {
-    loadFeed();
-  }
+if (currentUser) {
+  document.getElementById("authModal").classList.add("hidden");
+  loadFeed();
 }
 
-async function authenticateUser(username, password) {
+async function handleLogin() {
+  const username = document.getElementById("authUsername").value;
+  const password = document.getElementById("authPassword").value;
+  if(!username || !password) return alert("請輸入帳號與密碼");
+
   let res = await fetch("/api/login", {
     method: "POST",
     headers: {"Content-Type":"application/json"},
     body: JSON.stringify({username, password})
   });
-  if (res.ok) {
+  if(res.ok) {
     let data = await res.json();
     currentUser = data.user.username;
+    currentRole = data.user.role;
     localStorage.setItem("tgh_user", currentUser);
+    localStorage.setItem("tgh_role", currentRole);
+    document.getElementById("authModal").classList.add("hidden");
     loadFeed();
   } else {
-    let regRes = await fetch("/api/register", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({username, password})
-    });
-    if (regRes.ok) {
-      alert("註冊成功並已自動登入！");
-      currentUser = username;
-      localStorage.setItem("tgh_user", currentUser);
-      loadFeed();
-    } else {
-      alert("登入失敗，請重試");
-      checkAuth();
-    }
+    alert("帳號或密碼錯誤");
   }
+}
+
+async function handleRegister() {
+  const username = document.getElementById("authUsername").value;
+  const password = document.getElementById("authPassword").value;
+  if(!username || !password) return alert("請輸入帳號與密碼");
+
+  let res = await fetch("/api/register", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({username, password})
+  });
+  if(res.ok) {
+    alert("註冊成功！已自動為您登入");
+    handleLogin();
+  } else {
+    let err = await res.json();
+    alert(err.error || "註冊失敗");
+  }
+}
+
+// 產生並填入 Admin Key (格式: 日期 + TGH + Admin)
+function requestAdminKey() {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const key = today + "TGHAdmin";
+  document.getElementById("adminKeyInput").value = key;
+  alert("已成功向系統請求今日 Admin Key！");
+}
+
+// 驗證 Admin Key 並升級權限
+async function verifyAdminKey() {
+  const username = document.getElementById("authUsername").value;
+  const key = document.getElementById("adminKeyInput").value;
+  if(!username) return alert("請先在上方輸入您的帳號名稱");
+  if(!key) return alert("請先取得或輸入 Admin Key");
+
+  let res = await fetch("/api/admin-access", {
+    method: "POST",
+    headers: {"Content-Type":"application/json"},
+    body: JSON.stringify({ username, key })
+  });
+  if(res.ok) {
+    let data = await res.json();
+    currentUser = data.user.username;
+    currentRole = data.user.role;
+    localStorage.setItem("tgh_user", currentUser);
+    localStorage.setItem("tgh_role", currentRole);
+    alert("🎉 恭喜！已成功升級為 Admin 管理員");
+    document.getElementById("authModal").classList.add("hidden");
+    loadFeed();
+  } else {
+    let err = await res.json();
+    alert(err.error || "Key 驗證失敗");
+  }
+}
+
+function logout() {
+  localStorage.removeItem("tgh_user");
+  localStorage.removeItem("tgh_role");
+  location.reload();
 }
 
 function getYouTubeId(url) {
   if (!url) return "";
-  const regExp = /^.*(youtu.be\\/|v\\/|u\\/\\w\\/|embed\\/|watch\\?v=|\\&v=|\\/shorts\\/)([^#\\&\\?]*).*/;
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=|\/shorts\/)([^#\&\?]*).*/;
   const match = url.match(regExp);
   return (match && match[2].length === 11) ? match[2] : "";
 }
 
 async function loadFeed() {
-  if (!currentUser) return checkAuth();
   const res = await fetch("/api/posts?username=" + encodeURIComponent(currentUser));
   const posts = await res.json();
   const container = document.getElementById("feedContainer");
@@ -301,34 +362,34 @@ async function loadFeed() {
     let mediaContent = "";
     if (p.youtube_url) {
       const ytId = getYouTubeId(p.youtube_url);
-      if (ytId) mediaContent = \`<iframe class="reel-video" src="https://www.youtube.com/embed/\${ytId}?autoplay=1&mute=1&loop=1" allow="autoplay"></iframe>\`;
+      if (ytId) mediaContent = `<iframe class="reel-video" src="https://www.youtube.com/embed/${ytId}?autoplay=1&mute=1&loop=1" allow="autoplay"></iframe>`;
     } else if (p.image_url) {
-      mediaContent = \`<img class="reel-media" src="\${p.image_url}">\`;
+      mediaContent = `<img class="reel-media" src="${p.image_url}">`;
     } else {
-      mediaContent = \`<div class="reel-media" style="background:#202028;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;">\${p.content}</div>\`;
+      mediaContent = `<div class="reel-media" style="background:#202028;display:flex;align-items:center;justify-content:center;padding:30px;text-align:center;">${p.content}</div>`;
     }
 
     const likedClass = p.is_liked > 0 ? "liked" : "";
 
-    container.innerHTML += \`
+    container.innerHTML += `
       <div class="reel-card">
-        \${mediaContent}
+        ${mediaContent}
         <div class="reel-overlay">
-          <div class="reel-author">@\${p.username}</div>
-          <div class="reel-text">\${p.content}</div>
+          <div class="reel-author">@${p.username}</div>
+          <div class="reel-text">${p.content}</div>
         </div>
         <div class="action-bar">
-          <img class="avatar-badge" src="\${p.avatar_url || 'https://picsum.photos/200'}">
-          <button class="action-btn" onclick="toggleLike(\${p.id})">
-            <div class="action-icon \${likedClass}">♥</div>
-            <span>\${p.like_count}</span>
+          <img class="avatar-badge" src="${p.avatar_url || 'https://picsum.photos/200'}">
+          <button class="action-btn" onclick="toggleLike(${p.id})">
+            <div class="action-icon ${likedClass}">♥</div>
+            <span>${p.like_count}</span>
           </button>
-          <button class="action-btn" onclick="openComments(\${p.id})">
+          <button class="action-btn" onclick="openComments(${p.id})">
             <div class="action-icon">💬</div>
-            <span>\${p.comment_count}</span>
+            <span>${p.comment_count}</span>
           </button>
         </div>
-      </div>\`;
+      </div>`;
   });
 }
 
@@ -349,7 +410,7 @@ async function openComments(postId) {
   const list = document.getElementById("commentList");
   list.innerHTML = comments.length === 0 ? "<p style='color:#777;text-align:center;'>還沒有人留言，搶頭香吧！</p>" : "";
   comments.forEach(c => {
-    list.innerHTML += \`<div style="margin-bottom:10px;font-size:13px;"><b style="color:#ff3b5c">@\${c.username}:</b> \${c.content}</div>\`;
+    list.innerHTML += `<div style="margin-bottom:10px;font-size:13px;"><b style="color:#ff3b5c">@${c.username}:</b> ${c.content}</div>`;
   });
 }
 
@@ -390,26 +451,14 @@ async function openProfile() {
   const data = await res.json();
   document.getElementById("profileAvatar").src = data.user.avatar_url || 'https://picsum.photos/200';
   document.getElementById("profileUsername").innerText = "@" + data.user.username;
+  document.getElementById("profileRole").innerText = "身分：" + (data.user.role === 'admin' ? '👑 系統管理員 (Admin)' : '一般會員');
   document.getElementById("profileBio").innerText = data.user.bio || "尚無簡介";
   
   const myPosts = document.getElementById("myPostsList");
   myPosts.innerHTML = "";
   data.posts.forEach(p => {
-    myPosts.innerHTML += \`<div style="background:#121214;padding:10px;margin-bottom:8px;border-radius:8px;font-size:13px;">\${p.content}</div>\`;
+    myPosts.innerHTML += `<div style="background:#121214;padding:10px;margin-bottom:8px;border-radius:8px;font-size:13px;">${p.content}</div>`;
   });
-}
-
-async function openEditProfile() {
-  const newBio = prompt("請輸入新的個人簡介：", "");
-  const newAvatar = prompt("請輸入新的頭貼圖片網址：", "");
-  if (newBio !== null) {
-    await fetch("/api/profile", {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ username: currentUser, bio: newBio, avatar_url: newAvatar || undefined })
-    });
-    openProfile();
-  }
 }
 
 function togglePage(pageId, show) {
@@ -419,8 +468,6 @@ function togglePage(pageId, show) {
 }
 
 function switchNav(idx) {}
-
-window.onload = checkAuth;
 </script>
 </body>
 </html>`;
